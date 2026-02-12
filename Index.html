@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="mr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sargam Pro - Tabla Tuner</title>
+    <style>
+        :root {
+            --bg-color: #0a0a0c;
+            --accent-color: #00e5ff;
+            --glass-bg: rgba(255, 255, 255, 0.05);
+            --text-main: #ffffff;
+            --text-dim: #888;
+            --note-glow: rgba(0, 229, 255, 0.3);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+        body {
+            background: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Overlay Styling */
+        #overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            z-index: 1000; transition: opacity 0.5s ease;
+        }
+
+        #btn-start {
+            padding: 16px 40px; font-size: 1.2rem; font-weight: 600;
+            color: #000; background: var(--accent-color); border: none; border-radius: 50px;
+            cursor: pointer; text-transform: uppercase; letter-spacing: 1px;
+            box-shadow: 0 0 20px var(--note-glow);
+        }
+
+        #overlay h1 { margin-bottom: 20px; font-weight: 300; color: var(--accent-color); }
+
+        /* Main UI */
+        #top-bar {
+            padding: 20px; text-align: center; z-index: 20;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+        }
+
+        #current-note-display {
+            font-size: 4rem; font-weight: 800; color: var(--accent-color);
+            text-shadow: 0 0 20px var(--note-glow); transition: all 0.2s ease;
+        }
+
+        #current-freq { font-size: 1rem; color: var(--text-dim); margin-top: 5px; }
+
+        /* Canvas Area */
+        #container { flex: 1; position: relative; width: 100%; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #canvas-ui { z-index: 10; pointer-events: none; }
+        #canvas-signal { z-index: 5; }
+
+        /* Control Panel */
+        #controls {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            z-index: 30; background: var(--glass-bg); padding: 10px 20px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            display: flex; align-items: center; gap: 15px;
+        }
+
+        .slider-label { font-size: 0.8rem; color: var(--text-dim); }
+        input[type=range] { accent-color: var(--accent-color); cursor: pointer; }
+
+        .error-msg {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: #ff3d00; padding: 10px 20px; border-radius: 8px; z-index: 2000; display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <h1>Sargam Tuner Pro</h1>
+        <button id="btn-start">ट्यूनर सुरू करा</button>
+        <p style="margin-top: 20px; color: #555; font-size: 0.9rem;">अचूक ट्यूनिंगसाठी शांत ठिकाणी वापरा</p>
+    </div>
+
+    <div id="top-bar">
+        <div id="current-note-display">--</div>
+        <div id="current-freq">0.0 Hz</div>
+    </div>
+
+    <div id="container">
+        <canvas id="canvas-signal"></canvas>
+        <canvas id="canvas-ui"></canvas>
+        
+        <div id="controls">
+            <span class="slider-label">Sensitivity</span>
+            <input type="range" id="sensitivity-slider" min="5" max="50" value="30">
+        </div>
+    </div>
+
+    <div id="error-box" class="error-msg">मायक्रोफोन ॲक्सेस मिळाला नाही.</div>
+
+    <script>
+        const CONFIG = {
+            fftSize: 32768,
+            notes: ['Sa', 'Re (k)', 'Re', 'Ga (k)', 'Ga', 'Ma', 'Ma (t)', 'Pa', 'Dha (k)', 'Dha', 'Ni (k)', 'Ni'],
+            colors: ['#FF1744', '#F50057', '#D500F9', '#651FFF', '#3D5AFE', '#2979FF', '#00B0FF', '#00E5FF', '#1DE9B6', '#00E676', '#76FF03', '#C6FF00'],
+            holdFrames: 15
+        };
+
+        let currentThreshold = 30; // Reduced sensitivity (Higher value means less sensitive)
+        const historyBuffer = [];
+        let framesSinceSignal = 0;
+        let isRunning = false;
+
+        class AudioEngine {
+            constructor() {
+                this.ctx = null;
+                this.analyser = null;
+                this.dataArray = null;
+                this.currentFreq = 0;
+            }
+
+            async init() {
+                try {
+                    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    this.analyser = this.ctx.createAnalyser();
+                    this.analyser.fftSize = CONFIG.fftSize;
+                    this.analyser.smoothingTimeConstant = 0.2; // Smoother transitions
+
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: { 
+                            echoCancellation: false, 
+                            noiseSuppression: false, 
+                            autoGainControl: false 
+                        } 
+                    });
+                    
+                    const source = this.ctx.createMediaStreamSource(stream);
+                    source.connect(this.analyser);
+                    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+                    return true;
+                } catch (e) {
+                    document.getElementById('error-box').style.display = 'block';
+                    return false;
+                }
+            }
+
+            getPitch() {
+                if (!this.analyser) return null;
+                this.analyser.getByteFrequencyData(this.dataArray);
+                
+                const binSize = this.ctx.sampleRate / CONFIG.fftSize;
+                const minBin = Math.floor(60 / binSize);
+                const maxBin = Math.floor(2000 / binSize);
+
+                let maxAmp = 0;
+                let maxIndex = -1;
+
+                // Find the strongest peak within human instrument range
+                for (let i = minBin; i < maxBin; i++) {
+                    if (this.dataArray[i] > maxAmp) {
+                        maxAmp = this.dataArray[i];
+                        maxIndex = i;
+                    }
+                }
+
+                // Sensitivity Filter
+                if (maxAmp < currentThreshold) return null;
+
+                // Parabolic Interpolation for higher accuracy
+                let exactFreq = maxIndex * binSize;
+                if (maxIndex > 0 && maxIndex < this.dataArray.length - 1) {
+                    const l = this.dataArray[maxIndex - 1];
+                    const c = this.dataArray[maxIndex];
+                    const r = this.dataArray[maxIndex + 1];
+                    const delta = 0.5 * (r - l) / (2 * c - l - r);
+                    exactFreq = (maxIndex + delta) * binSize;
+                }
+
+                this.currentFreq = exactFreq;
+
+                const midi = 12 * Math.log2(exactFreq / 440) + 69;
+                let pitch = midi % 12;
+                if (pitch < 0) pitch += 12;
+
+                return {
+                    pitch: pitch,
+                    noteIndex: Math.round(pitch) % 12,
+                    amp: maxAmp,
+                    freq: exactFreq
+                };
+            }
+        }
+
+        class DisplayEngine {
+            constructor() {
+                this.uiCanvas = document.getElementById('canvas-ui');
+                this.uiCtx = this.uiCanvas.getContext('2d');
+                this.sigCanvas = document.getElementById('canvas-signal');
+                this.sigCtx = this.sigCanvas.getContext('2d', { alpha: false });
+                this.noteEl = document.getElementById('current-note-display');
+                this.freqEl = document.getElementById('current-freq');
+                
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+            }
+
+            resize() {
+                const dpr = window.devicePixelRatio || 1;
+                this.width = window.innerWidth;
+                this.height = this.sigCanvas.parentElement.clientHeight;
+
+                [this.uiCanvas, this.sigCanvas].forEach(c => {
+                    c.width = this.width * dpr;
+                    c.height = this.height * dpr;
+                    c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+                });
+                this.drawUI();
+            }
+
+            drawUI() {
+                const ctx = this.uiCtx;
+                ctx.clearRect(0, 0, this.width, this.height);
+                const step = this.height / 12;
+                
+                ctx.font = '12px Segoe UI';
+                ctx.textBaseline = 'middle';
+
+                for (let i = 0; i < 12; i++) {
+                    const y = this.height - ((i + 1) * step);
+                    
+                    // Grid lines
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+                    ctx.beginPath(); ctx.moveTo(60, y); ctx.lineTo(this.width, y); ctx.stroke();
+                    
+                    // Note Names
+                    ctx.fillStyle = (i % 2 === 0) ? '#aaa' : '#666';
+                    ctx.fillText(CONFIG.notes[i], 15, y + step / 2);
+                }
+                
+                // Sidebar separator
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+                ctx.beginPath(); ctx.moveTo(55, 0); ctx.lineTo(55, this.height); ctx.stroke();
+            }
+
+            updateLabels(peak) {
+                if (peak) {
+                    this.noteEl.textContent = CONFIG.notes[peak.noteIndex];
+                    this.noteEl.style.color = CONFIG.colors[peak.noteIndex];
+                    this.freqEl.textContent = peak.freq.toFixed(1) + " Hz";
+                } else {
+                    if (framesSinceSignal > 30) {
+                        this.noteEl.textContent = "--";
+                        this.noteEl.style.color = "var(--accent-color)";
+                        this.freqEl.textContent = "0.0 Hz";
+                    }
+                }
+            }
+
+            render(history) {
+                const ctx = this.sigCtx;
+                ctx.fillStyle = "#0a0a0c";
+                ctx.fillRect(0, 0, this.width, this.height);
+
+                const step = this.height / 12;
+                const speed = 2.5;
+                let x = this.width;
+
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                ctx.beginPath();
+                let started = false;
+
+                for (let i = history.length - 1; i >= 0; i--) {
+                    const point = history[i];
+                    if (point) {
+                        const y = this.height - (point.pitch * step) - (step / 2);
+
+                        if (!started) {
+                            ctx.moveTo(x, y);
+                            started = true;
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                        
+                        // Small dot for current point
+                        if (i === history.length - 1) {
+                            ctx.save();
+                            ctx.shadowBlur = 15;
+                            ctx.shadowColor = CONFIG.colors[point.noteIndex];
+                            ctx.fillStyle = CONFIG.colors[point.noteIndex];
+                            ctx.arc(x, y, 4, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.restore();
+                            ctx.beginPath();
+                            ctx.moveTo(x, y);
+                        }
+                    } else {
+                        started = false;
+                        ctx.stroke();
+                        ctx.beginPath();
+                    }
+
+                    x -= speed;
+                    if (x < 55) break;
+                }
+
+                ctx.strokeStyle = "rgba(0, 229, 255, 0.8)";
+                ctx.stroke();
+            }
+        }
+
+        const audio = new AudioEngine();
+        const display = new DisplayEngine();
+
+        // Control sensitivity from slider
+        document.getElementById('sensitivity-slider').addEventListener('input', (e) => {
+            // Higher value in slider = more sensitive? 
+            // Let's invert it for better UX: slider value 50 means very sensitive (low threshold)
+            currentThreshold = 55 - e.target.value; 
+        });
+
+        document.getElementById('btn-start').addEventListener('click', async () => {
+            const ok = await audio.init();
+            if (ok) {
+                document.getElementById('overlay').style.opacity = '0';
+                setTimeout(() => {
+                    document.getElementById('overlay').style.display = 'none';
+                    isRunning = true;
+                    loop();
+                }, 500);
+            }
+        });
+
+        function loop() {
+            if (!isRunning) return;
+            
+            const peak = audio.getPitch();
+            
+            if (!peak) {
+                if (framesSinceSignal < CONFIG.holdFrames && historyBuffer.length > 0) {
+                    const lastPoint = historyBuffer[historyBuffer.length - 1];
+                    historyBuffer.push(lastPoint);
+                } else {
+                    historyBuffer.push(null);
+                }
+                framesSinceSignal++;
+            } else {
+                historyBuffer.push(peak);
+                framesSinceSignal = 0;
+            }
+
+            if (historyBuffer.length > (window.innerWidth / 2) + 20) {
+                historyBuffer.shift();
+            }
+
+            display.updateLabels(peak);
+            display.render(historyBuffer);
+            requestAnimationFrame(loop);
+        }
+    </script>
+</body>
+</html>
